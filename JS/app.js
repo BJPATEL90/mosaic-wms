@@ -144,11 +144,12 @@ let inventory  = (ls('inv') || []).map(r => ({
 let gatepasses = ls('gp')  || [];
 let adjLog     = ls('adj') || [];
 let grnLog     = ls('grn') || [];
+let putawayLog = ls('putaway') || [];
 let skuMaster  = ls('sku') || [];
 let binMaster  = ls('bin') || [];
 let ccLog      = [];
 let ccLines    = [];
-let iwRows     = [];
+let iwRows     = []; 
 
 /* Fast index maps — O(1) bin/SKU lookups on 50k+ rows */
 const IDX={byBin:{},bySKU:{}};
@@ -252,6 +253,57 @@ function toggleSidebar(){ $('sidebar').classList.toggle('open'); }
 
 
 function findCol(heads,als){ return heads.find(h=>als.includes(str(h).toLowerCase()))||null; }
+
+function normalizeBinRow(bin){
+  return {
+    id:    str(bin.id),
+    zone:  str(bin.zone),
+    fsn:   str(bin.fsn||'B').toUpperCase(),
+    cap:   num(bin.cap||0),
+    status:str(bin.status||'EMPTY').toUpperCase(),
+    sku:   str(bin.sku||''),
+    brand: str(bin.brand||'').toUpperCase(),
+  };
+}
+
+function deriveBrandFromBin(binId){
+  const invRows = IDX.byBin[binId] || [];
+  if(invRows.length){
+    const skuCode = invRows[0].skuCode;
+    const skuMasterRow = skuMaster.find(s => s.code === skuCode);
+    return str(skuMasterRow ? skuMasterRow.brand : '') || str(invRows[0].brand||'').toUpperCase();
+  }
+  const bin = binMaster.find(b => str(b.id) === str(binId));
+  return bin ? str(bin.brand||'').toUpperCase() : '';
+}
+
+function findPutawayBins(cls,brand,max=15){
+  const desiredClass = str(cls||'B').toUpperCase();
+  const desiredBrand = str(brand||'').toUpperCase();
+  const occupied = new Set(inventory.map(r=>r.bin).filter(Boolean));
+  const bins = (binMaster.length ? binMaster : []).map(normalizeBinRow);
+
+  const scored = bins
+    .filter(b => str(b.status) !== 'BLOCKED')
+    .map(b => {
+      const liveOcc = occupied.has(b.id);
+      const status = liveOcc ? 'OCCUPIED' : b.status;
+      let score = 1000;
+      if(status==='EMPTY') score -= 300;
+      if(status==='OCCUPIED') score += 100;
+      if(status==='BLOCKED') score += 1000;
+      if(b.fsn === desiredClass) score -= 200;
+      else if(desiredClass && b.fsn !== desiredClass) score += 50;
+      if(desiredBrand && b.brand === desiredBrand) score -= 200;
+      else if(desiredBrand && b.brand && b.brand !== desiredBrand) score += 50;
+      if(!b.brand && desiredBrand) score += 20;
+      if(!b.brand && !desiredBrand) score -= 20;
+      return {...b, score, status};
+    });
+
+  scored.sort((a,b) => a.score - b.score || a.id.localeCompare(b.id));
+  return scored.slice(0,max).map(r=>r.id);
+}
 
 const INV_COLS = {
   skuCode:  ['sku code','sku_code','material code','sku','item code'],
@@ -1082,7 +1134,7 @@ let _tickTimer  = null;
 /* Called after every persist() — mark as dirty */
 
 function persistAndMark(){
-  lss('inv',inventory); lss('gp',gatepasses); lss('adj',adjLog);
+  lss('inv',inventory); lss('gp',gatepasses); lss('adj',adjLog); lss('putaway',putawayLog);
   _dirty = true;
   updateSyncBar();
 }
@@ -1264,14 +1316,50 @@ function loadDashboard(){
 let grnLines=[];
 let _grnUpRows=[];
 
+let currentGRNPutaway=null;
+
+function getPutawayCounts(){
+  return {
+    pending:   putawayLog.filter(p=>p.status==='PENDING').length,
+    printed:   putawayLog.filter(p=>p.status==='PRINTED').length,
+    completed: putawayLog.filter(p=>p.status==='COMPLETED').length,
+  };
+}
+
+function savePutawayLog(){
+  lss('putaway',putawayLog);
+  _dirty = true;
+  updateSyncBar();
+}
+
+function renderPutawaySummary(){
+  const counts = getPutawayCounts();
+  if($('grn-putaway-pending')) $('grn-putaway-pending').innerText = counts.pending;
+  if($('grn-putaway-printed')) $('grn-putaway-printed').innerText = counts.printed;
+  if($('grn-putaway-completed')) $('grn-putaway-completed').innerText = counts.completed;
+  const completeBtn = $('grn-putaway-complete-btn');
+  if(completeBtn){
+    completeBtn.style.display = currentGRNPutaway && currentGRNPutaway.status !== 'COMPLETED' ? 'inline-flex' : 'none';
+  }
+}
+
+function updatePutawayLog(plan){
+  const idx = putawayLog.findIndex(p=>p.id===plan.id);
+  if(idx>=0) putawayLog[idx]=plan;
+  else putawayLog.push(plan);
+  savePutawayLog();
+}
+
 const GRN_COLS={
   sku:   ['sku code','sku_code','material code','sku','item code'],
   name:  ['sku name','sku_name','material name','name','description'],
+  brand: ['brand','brand name','brand code'],
   batch: ['batch','batch no','batch_no','lot'],
   mfg:   ['mfg date','mfg_date','manufacture date','mfg. date'],
   exp:   ['exp date','exp_date','expiry date','expiry','exp. date'],
   qty:   ['qty','quantity','units'],
   case:  ['case pack','case pack (units/box)','casePack','units/box'],
+  box:   ['box/pallet','boxPallet','boxes/shelf','box pallet','box'],
   cls:   ['classification','class','fsn class','cls','classification (a/b/c)'],
 };
 
@@ -1281,6 +1369,7 @@ function initGRN(){
   if($('grn-date'))$('grn-date').value=today;
   if($('grn-up-date'))$('grn-up-date').value=today;
   setGRNMode('manual',document.getElementById('grn-tab-manual'));
+  renderPutawaySummary();
 }
 
 function initGRNNo(){
@@ -1298,7 +1387,7 @@ function setGRNMode(mode,el){
 }
 
 function addGRNLine(){
-  grnLines.push({sku:'',name:'',batch:'',mfg:'',exp:'',qty:0,casePack:'',cls:'B'});
+  grnLines.push({sku:'',name:'',brand:'',batch:'',mfg:'',exp:'',qty:0,casePack:'',boxPallet:'',cls:'B',bin:'',suggested:''});
   renderGRNLines();
   $('grn-clear-btn').style.display='inline-flex';
 }
@@ -1312,35 +1401,56 @@ function removeGRNLine(i){
 function renderGRNLines(){
   const body=$('grn-lines-body');
   if(!grnLines.length){
-    body.innerHTML='<tr class="er"><td colspan="10">Click "+ Add Line" to begin</td></tr>';
+    body.innerHTML='<tr class="er"><td colspan="17">Click "+ Add Line" to begin</td></tr>';
     $('grn-line-count').innerText='0 lines';
     $('grn-total-qty').innerText='0';
     return;
   }
   const skuOpts=skuMaster.map(s=>`<option value="${esc(s.code)}">`).join('');
-  body.innerHTML=grnLines.map((l,i)=>`<tr>
-    <td style="font-size:11px;color:var(--slate4)">${i+1}</td>
-    <td><input class="ti" value="${esc(l.sku)}" list="grn-sku-dl" placeholder="SKU code"
-      onchange="grnLines[${i}].sku=this.value;grnAutoFill(${i})" style="width:160px;border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11.5px"></td>
-    <td><input class="ti" value="${esc(l.name)}" placeholder="Product name"
-      onchange="grnLines[${i}].name=this.value" style="width:160px;border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11.5px"></td>
-    <td><input class="ti" value="${esc(l.batch)}" placeholder="Batch No"
-      onchange="grnLines[${i}].batch=this.value" style="width:90px;border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11px;font-family:ui-monospace,monospace"></td>
-    <td><input type="date" value="${l.mfg||''}" onchange="grnLines[${i}].mfg=this.value"
-      style="border:1px solid var(--border);border-radius:4px;padding:3px 5px;font-size:11px;width:130px"></td>
-    <td><input type="date" value="${l.exp||''}" onchange="grnLines[${i}].exp=this.value"
-      style="border:1px solid var(--border);border-radius:4px;padding:3px 5px;font-size:11px;width:130px"></td>
-    <td><input type="number" value="${l.qty||''}" min="0" onchange="grnLines[${i}].qty=Number(this.value);updateGRNTotals()"
-      class="tbl-qty" style="width:75px"></td>
-    <td><input type="number" value="${l.casePack||''}" min="0" placeholder="—"
-      onchange="grnLines[${i}].casePack=this.value" style="border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11px;width:70px;text-align:right"></td>
-    <td><select onchange="grnLines[${i}].cls=this.value" style="border:1px solid var(--border);border-radius:4px;padding:3px 5px;font-size:11px">
-      <option ${l.cls==='A'?'selected':''}>A</option>
-      <option ${l.cls==='B'||!l.cls?'selected':''}>B</option>
-      <option ${l.cls==='C'?'selected':''}>C</option>
-    </select></td>
-    <td><button class="btn btn-d btn-xs" onclick="removeGRNLine(${i})">✕</button></td>
-  </tr>`).join('');
+  body.innerHTML=grnLines.map((l,i)=>{
+    const qty = num(l.qty);
+    const casePack = num(l.casePack||0);
+    const boxPallet = num(l.boxPallet||0);
+    const fullBoxes = casePack ? Math.floor(qty / casePack) : 0;
+    const loose = casePack ? qty % casePack : qty;
+    const totalBoxes = casePack ? fullBoxes + (loose ? 1 : 0) : 0;
+    const binsNeeded = boxPallet ? Math.ceil(totalBoxes / boxPallet) : 0;
+    return `<tr>
+      <td style="font-size:11px;color:var(--slate4)">${i+1}</td>
+      <td><input class="ti" value="${esc(l.sku)}" list="grn-sku-dl" placeholder="SKU code"
+        onchange="grnLines[${i}].sku=this.value;grnAutoFill(${i})" style="width:160px;border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11.5px"></td>
+      <td><input class="ti" value="${esc(l.name)}" placeholder="Product name"
+        onchange="grnLines[${i}].name=this.value" style="width:160px;border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11.5px"></td>
+      <td><input class="ti" value="${esc(l.brand||'')}" placeholder="Brand" onchange="grnLines[${i}].brand=this.value;grnLines[${i}].suggested='';" style="width:120px;border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11px"></td>
+      <td><input class="ti" value="${esc(l.batch)}" placeholder="Batch No"
+        onchange="grnLines[${i}].batch=this.value" style="width:90px;border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11px;font-family:ui-monospace,monospace"></td>
+      <td><input type="date" value="${l.mfg||''}" onchange="grnLines[${i}].mfg=this.value"
+        style="border:1px solid var(--border);border-radius:4px;padding:3px 5px;font-size:11px;width:130px"></td>
+      <td><input type="date" value="${l.exp||''}" onchange="grnLines[${i}].exp=this.value"
+        style="border:1px solid var(--border);border-radius:4px;padding:3px 5px;font-size:11px;width:130px"></td>
+      <td><input type="number" value="${l.qty||''}" min="0" onchange="grnLines[${i}].qty=Number(this.value);updateGRNTotals()"
+        class="tbl-qty" style="width:75px"></td>
+      <td><input type="number" value="${l.casePack||''}" min="0" placeholder="—"
+        onchange="grnLines[${i}].casePack=this.value" style="border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11px;width:70px;text-align:right"></td>
+      <td><input type="number" value="${l.boxPallet||''}" min="0" placeholder="—"
+        onchange="grnLines[${i}].boxPallet=this.value" style="border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11px;width:70px;text-align:right"></td>
+      <td style="font-size:11px;text-align:right">${fullBoxes||'—'}</td>
+      <td style="font-size:11px;text-align:right">${loose||'—'}</td>
+      <td style="font-size:11px;text-align:right">${binsNeeded||'—'}</td>
+      <td><select onchange="grnLines[${i}].cls=this.value" style="border:1px solid var(--border);border-radius:4px;padding:3px 5px;font-size:11px;width:60px">
+        <option ${l.cls==='A'?'selected':''}>A</option>
+        <option ${l.cls==='B'||!l.cls?'selected':''}>B</option>
+        <option ${l.cls==='C'?'selected':''}>C</option>
+      </select></td>
+      <td><input class="ti" value="${esc(l.bin||'')}" placeholder="Bin"
+        onchange="grnLines[${i}].bin=this.value;grnLines[${i}].suggested='';" style="width:100px;border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11px"></td>
+      <td style="font-size:11px">${esc(l.suggested||'')}</td>
+      <td>
+        <button class="btn btn-s btn-xs" onclick="suggestPutaway(${i})">Suggest</button>
+        <button class="btn btn-d btn-xs" onclick="removeGRNLine(${i})">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
   // SKU datalist for GRN
   if(!$('grn-sku-dl')){
     const dl=document.createElement('datalist');dl.id='grn-sku-dl';document.body.appendChild(dl);
@@ -1361,9 +1471,151 @@ function grnAutoFill(i){
   if(master){
     grnLines[i].name=master.name||'';
     grnLines[i].casePack=master.casePack||'';
+    grnLines[i].boxPallet=master.boxPallet||'';
     grnLines[i].cls=master.cls||'B';
+    grnLines[i].brand=master.brand||'';
+    grnLines[i].suggested='';
     renderGRNLines();
   }
+}
+
+function suggestPutaway(i){
+  const line=grnLines[i];
+  if(!line) return;
+  const sku = str(line.sku);
+  if(!sku){ toast('Enter SKU first to suggest putaway','warn'); return; }
+  const master = skuMaster.find(s=>s.code===sku) || {};
+  const cls = str(line.cls||master.cls||'B').toUpperCase();
+  const brand = str(master.brand||line.brand||'').toUpperCase();
+  const bins = findPutawayBins(cls,brand,10);
+  if(bins.length){
+    line.bin=bins[0];
+    line.suggested=bins.join(', ');
+    renderGRNLines();
+    toast(`Suggested bin ${bins[0]} for ${sku}`,'ok',2000);
+  } else {
+    line.suggested='No matching bins';
+    renderGRNLines();
+    toast('No putaway bins found for this SKU','warn',2000);
+  }
+}
+
+function computeGRNLineStats(line){
+  const qty = num(line.qty);
+  const casePack = num(line.casePack||0);
+  const boxPallet = num(line.boxPallet||0);
+  const fullBoxes = casePack ? Math.floor(qty / casePack) : 0;
+  const loose = casePack ? qty % casePack : qty;
+  const totalBoxes = casePack ? fullBoxes + (loose ? 1 : 0) : 0;
+  const bins = boxPallet ? Math.ceil(totalBoxes / boxPallet) : 0;
+  return {qty,casePack,boxPallet,fullBoxes,loose,totalBoxes,bins};
+}
+
+function generatePutaway(){
+  const validLines=grnLines.filter(l=>l.sku&&Number(l.qty)>0);
+  if(!validLines.length){toast('Add at least one line with SKU and Qty','warn');return;}
+
+  const planLines=validLines.map(l=>{
+    const master=skuMaster.find(s=>s.code===l.sku)||{};
+    const cls = str(l.cls||master.cls||'B').toUpperCase();
+    const brand = str(l.brand||master.brand||'').toUpperCase();
+    const stats=computeGRNLineStats({
+      qty:l.qty, casePack:l.casePack||master.casePack, boxPallet:l.boxPallet||master.boxPallet
+    });
+    const bins=findPutawayBins(cls,brand,20);
+    let remaining=stats.totalBoxes;
+    const allocation=[];
+    bins.forEach(binId=>{
+      if(remaining<=0) return;
+      const bin=binMaster.find(b=>str(b.id)===binId);
+      const cap=num(bin?.cap||0)||stats.boxPallet||remaining;
+      const assign=Math.min(remaining,cap);
+      if(assign>0){
+        allocation.push({bin:binId,boxes:assign,units:assign*(stats.casePack||1)});
+        remaining-=assign;
+      }
+    });
+    return {...l,cls,brand,stats,allocation,enough:remaining<=0,shortfall:remaining};
+  });
+
+  const plan = {
+    id: 'PA-'+Date.now(),
+    grnNo: $('grn-no') ? $('grn-no').value : 'UNSAVED',
+    createdAt: new Date().toISOString(),
+    status: 'PENDING',
+    printedAt: null,
+    completedAt: null,
+    lines: planLines,
+  };
+  currentGRNPutaway = plan;
+  updatePutawayLog(plan);
+  renderPutawayPlan();
+  renderPutawaySummary();
+  if(planLines.some(p=>!p.enough)) toast('Putaway plan created, but some lines need more bin capacity','warn');
+  else toast('Putaway plan created','ok');
+}
+
+function renderPutawayPlan(){
+  const panel=$('grn-putaway-panel');
+  const content=$('grn-putaway-content');
+  if(!currentGRNPutaway){panel.style.display='none';return;}
+  panel.style.display='block';
+  const statusClass = currentGRNPutaway.status==='COMPLETED' ? 'b-ok' : currentGRNPutaway.status==='PRINTED' ? 'b-info' : 'b-warn';
+  const createdAt = new Date(currentGRNPutaway.createdAt).toLocaleString('en-IN');
+  const header = `<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+      <span class="chip chip-t">Plan ID: ${esc(currentGRNPutaway.id)}</span>
+      <span class="chip ${statusClass}">Status: ${esc(currentGRNPutaway.status)}</span>
+      <span class="chip chip-info">Created: ${esc(createdAt)}</span>
+      ${currentGRNPutaway.printedAt?'<span class="chip chip-ok">Printed: '+esc(new Date(currentGRNPutaway.printedAt).toLocaleDateString('en-IN'))+'</span>':''}
+      ${currentGRNPutaway.completedAt?'<span class="chip chip-ok">Completed: '+esc(new Date(currentGRNPutaway.completedAt).toLocaleDateString('en-IN'))+'</span>':''}
+    </div>`;
+  content.innerHTML = header + currentGRNPutaway.lines.map((p,i)=>{
+    const row=`<div style="margin-bottom:14px;padding:12px;border:1px solid var(--border);border-radius:10px;background:#f8fafc">
+      <div style="font-size:12px;font-weight:700;margin-bottom:6px">${i+1}. ${esc(p.sku)} — ${esc(p.name||'')}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;font-size:12px;margin-bottom:8px">
+        <div>Qty: ${p.stats.qty}</div>
+        <div>Case Pack: ${p.stats.casePack||'—'}</div>
+        <div>Box/Pallet: ${p.stats.boxPallet||'—'}</div>
+        <div>Bins needed: ${p.stats.bins||'—'}</div>
+      </div>
+      <div style="font-size:12px;margin-bottom:8px">Allocation:</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${p.allocation.map(a=>`<span class="badge b-pending" style="font-size:10px">${esc(a.bin)}: ${a.boxes} boxes (${a.units} units)</span>`).join('')}</div>
+      ${p.enough?'<div style="margin-top:6px;font-size:12px;color:var(--green)">Capacity sufficient</div>':'<div style="margin-top:6px;font-size:12px;color:var(--red)">Shortfall: '+p.shortfall+' boxes</div>'}
+    </div>`;
+    return row;
+  }).join('');
+}
+
+function printPutawayPlan(){
+  if(!currentGRNPutaway){toast('Generate putaway plan first','warn');return;}
+  currentGRNPutaway.status = currentGRNPutaway.status === 'COMPLETED' ? 'COMPLETED' : 'PRINTED';
+  currentGRNPutaway.printedAt = new Date().toISOString();
+  updatePutawayLog(currentGRNPutaway);
+  renderPutawayPlan();
+  renderPutawaySummary();
+
+  const docLines=currentGRNPutaway.lines.map((p,i)=>{
+    const alloc=p.allocation.map(a=>`${a.bin}: ${a.boxes} boxes (${a.units} units)`).join(' | ');
+    return `<tr><td>${i+1}</td><td>${esc(p.sku)}</td><td>${esc(p.name||'')}</td><td>${esc(p.brand||'')}</td><td>${p.stats.qty}</td><td>${p.stats.casePack||'—'}</td><td>${p.stats.boxPallet||'—'}</td><td>${p.stats.fullBoxes||'—'}</td><td>${p.stats.loose||'—'}</td><td>${p.stats.bins||'—'}</td><td>${esc(alloc)}</td></tr>`;
+  }).join('');
+  const htmlBody=`<html><head><title>Putaway Plan</title><style>body{font-family:system-ui,sans-serif;font-size:12px;padding:18px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #d1d5db;padding:6px;text-align:left}th{background:#f8fafc}</style></head><body><h2>Putaway Plan</h2><table><thead><tr><th>#</th><th>SKU</th><th>Name</th><th>Brand</th><th>Qty</th><th>Case Pack</th><th>Box/Pallet</th><th>Full Boxes</th><th>Loose</th><th>Bins</th><th>Allocation</th></tr></thead><tbody>${docLines}</tbody></table></body></html>`;
+  const w=window.open();
+  if(!w) return toast('Pop-up blocked. Allow pop-ups to print','warn');
+  w.document.write(htmlBody);
+  w.document.close();
+  w.focus();
+  w.print();
+}
+
+function markPutawayCompleted(){
+  if(!currentGRNPutaway){toast('Generate putaway plan first','warn');return;}
+  if(currentGRNPutaway.status==='COMPLETED'){toast('Putaway already marked completed','info');return;}
+  currentGRNPutaway.status='COMPLETED';
+  currentGRNPutaway.completedAt=new Date().toISOString();
+  updatePutawayLog(currentGRNPutaway);
+  renderPutawayPlan();
+  renderPutawaySummary();
+  toast('Putaway plan marked completed','ok');
 }
 
 async function saveGRN(){
@@ -1397,11 +1649,11 @@ function clearGRNFields(){ ['grn-supplier','grn-vehicle'].forEach(id=>{if($(id))
 
 function dlGRNTemplate(){
   const ws=XLSX.utils.aoa_to_sheet([
-    ['SKU Code','SKU Name','Batch No','MFG Date','EXP Date','Qty','Case Pack (Units/Box)','Classification (A/B/C)'],
-    ['MWLJNTP.0003.B0_N','LJ NutriMix 2+ 350gm','BATCH001','01-Jan-2024','31-Dec-2025',100,24,'A'],
-    ['MWBWSKP.00648.B0_N','BB 10% Urea Lotion 200ml','BATCH002','15-Feb-2024','28-Feb-2026',200,40,'B'],
+    ['SKU Code','SKU Name','Brand','Batch No','MFG Date','EXP Date','Qty','Case Pack (Units/Box)','Box/Pallet (Boxes/Shelf)','Classification (A/B/C)'],
+    ['MWLJNTP.0003.B0_N','LJ NutriMix 2+ 350gm','LITTLEJOYS','BATCH001','01-Jan-2024','31-Dec-2025',100,24,40,'A'],
+    ['MWBWSKP.00648.B0_N','BB 10% Urea Lotion 200ml','BEBODYWISE','BATCH002','15-Feb-2024','28-Feb-2026',200,40,40,'B'],
   ]);
-  ws['!cols']=[{wch:28},{wch:34},{wch:12},{wch:12},{wch:12},{wch:8},{wch:18},{wch:20}];
+  ws['!cols']=[{wch:28},{wch:34},{wch:16},{wch:12},{wch:12},{wch:12},{wch:8},{wch:18},{wch:16},{wch:20}];
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'GRN Template');XLSX.writeFile(wb,'GRN_Template.xlsx');
 }
 
@@ -1421,11 +1673,13 @@ function parseGRNFile(ev){
     }).map(r=>({
       sku:  str(cm.sku  ?r[cm.sku]  :''),
       name: str(cm.name ?r[cm.name] :''),
+      brand:str(cm.brand ?r[cm.brand]:''),
       batch:str(cm.batch?r[cm.batch]:''),
       mfg:  str(cm.mfg  ?r[cm.mfg]  :''),
       exp:  str(cm.exp  ?r[cm.exp]  :''),
       qty:  num(cm.qty  ?r[cm.qty]  :0),
       casePack:str(cm.case?r[cm.case]:''),
+      boxPallet:str(cm.box ?r[cm.box]:''),
       cls:  str(cm.cls  ?r[cm.cls]  :'B')||'B',
     }));
     msg.innerText=`✓ ${_grnUpRows.length} lines ready to save`;
@@ -1434,11 +1688,13 @@ function parseGRNFile(ev){
       <td style="font-size:11px">${i+1}</td>
       <td><span class="sku-b" style="font-size:9px">${esc(r.sku)}</span></td>
       <td style="font-size:11.5px">${esc(r.name||'—')}</td>
+      <td style="font-size:11px">${esc(r.brand||'—')}</td>
       <td class="mono" style="font-size:11px">${esc(r.batch||'—')}</td>
       <td style="font-size:11px">${esc(r.mfg||'—')}</td>
       <td style="font-size:11px">${esc(r.exp||'—')}</td>
       <td style="text-align:right;font-family:ui-monospace,monospace;font-weight:700">${r.qty.toLocaleString()}</td>
       <td style="font-size:11px">${esc(r.casePack||'—')}</td>
+      <td style="font-size:11px">${esc(r.boxPallet||'—')}</td>
       <td><span class="badge b-info" style="font-size:9px">${esc(r.cls)}</span></td>
     </tr>`).join('');
   });
@@ -1519,6 +1775,7 @@ const BIN_COLS={
   cap:   ['capacity (boxes)','capacity','boxes'],
   status:['status'],
   sku:   ['sku in bin','sku','material'],
+  brand: ['brand','brand name','brand code'],
 };
 let _binFiltered=[], _binPage=1;
 const BIN_PAGE=150;
@@ -1531,14 +1788,15 @@ function parseBinFile(ev){
     const heads=Object.keys(rows[0]);
     const cm={};Object.keys(BIN_COLS).forEach(k=>cm[k]=findCol(heads,BIN_COLS[k]));
     if(!cm.id){toast('Bin ID column required','err');return;}
-    binMaster=rows.map(r=>({
+    binMaster=rows.map(r=>(normalizeBinRow({
       id:   str(cm.id    ?r[cm.id]    :''),
       zone: str(cm.zone  ?r[cm.zone]  :''),
       fsn:  str(cm.fsn   ?r[cm.fsn]   :'B'),
       cap:  num(cm.cap   ?r[cm.cap]   :0),
       status:str(cm.status?r[cm.status]:'EMPTY').toUpperCase(),
       sku:  str(cm.sku   ?r[cm.sku]   :''),
-    })).filter(r=>r.id);
+      brand:str(cm.brand?r[cm.brand]:'')
+    }))).filter(r=>r.id);
     persistAndMark();
     renderBinTable();
     toast(`${binMaster.length} bins loaded`,'ok');
@@ -1553,8 +1811,10 @@ function renderBinTable(){
 
   // Merge occupancy from inventory
   const occBins=new Set(inventory.map(r=>r.bin).filter(Boolean));
-  const displayBins=binMaster.length?binMaster:
-    [...occBins].map(b=>({id:b,zone:'',fsn:'',cap:'',status:'OCCUPIED',sku:''}));
+  const displayBins=(binMaster.length?binMaster:[]).map(normalizeBinRow);
+  if(!displayBins.length){
+    [...occBins].forEach(b=>displayBins.push({id:b,zone:'',fsn:'B',cap:'',status:'OCCUPIED',sku:'',brand:deriveBrandFromBin(b)}));
+  }
 
   _binFiltered=displayBins.filter(r=>{
     if(q&&!(r.id.toLowerCase().includes(q)||(r.zone||'').toLowerCase().includes(q)))return false;
@@ -1564,9 +1824,9 @@ function renderBinTable(){
 
   // Stats
   const total=displayBins.length;
-  const empty=displayBins.filter(r=>r.status.toUpperCase()==='EMPTY').length;
-  const occ  =displayBins.filter(r=>r.status.toUpperCase()==='OCCUPIED').length;
-  const blk  =displayBins.filter(r=>r.status.toUpperCase()==='BLOCKED').length;
+  const empty=displayBins.filter(r=>str(r.status).toUpperCase()==='EMPTY').length;
+  const occ  =displayBins.filter(r=>str(r.status).toUpperCase()==='OCCUPIED').length;
+  const blk  =displayBins.filter(r=>str(r.status).toUpperCase()==='BLOCKED').length;
   $('bin-total').innerText=total;$('bin-empty').innerText=empty;
   $('bin-occ').innerText=occ;$('bin-blk').innerText=blk;
 
@@ -1589,6 +1849,7 @@ function renderBinPage(){
     return`<tr>
       <td><span class="bin-b">${esc(r.id)}</span></td>
       <td style="font-size:11.5px">${esc(r.zone||'—')}</td>
+      <td style="font-size:11.5px">${esc(r.brand||'—')}</td>
       <td><span class="badge b-info" style="font-size:9px">${esc(r.fsn||'B')}</span></td>
       <td style="text-align:center;font-size:11.5px">${r.cap||'—'}</td>
       <td><span class="badge ${cls}" style="font-size:9px">${effStatus}</span></td>
@@ -1611,15 +1872,15 @@ function renderBinPgn(){
 
 function dlBinTpl(){
   const ws=XLSX.utils.aoa_to_sheet([
-    ['Bin ID','Zone','FSN Class (A/B/C)','Capacity (Boxes)','Status'],
-    ['R1-C1-001','OWN','A',24,'EMPTY'],['R4-C1-001','BeBodywise','B',40,'OCCUPIED'],
+    ['Bin ID','Zone','Brand','FSN Class (A/B/C)','Capacity (Boxes)','Status'],
+    ['R1-C1-001','OWN','BRAND1','A',24,'EMPTY'],['R4-C1-001','BeBodywise','BRAND2','B',40,'OCCUPIED'],
   ]);
-  ws['!cols']=[{wch:14},{wch:14},{wch:18},{wch:16},{wch:12}];
+  ws['!cols']=[{wch:14},{wch:14},{wch:18},{wch:16},{wch:12},{wch:12}];
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Bin Master');XLSX.writeFile(wb,'Bin_Master_Template.xlsx');
 }
 
 function exportBinXLSX(){
-  const rows=_binFiltered.map(r=>({'Bin ID':r.id,'Zone':r.zone,'FSN Class':r.fsn,'Capacity':r.cap,'Status':r.status,'SKU in Bin':r.sku}));
+  const rows=_binFiltered.map(r=>({'Bin ID':r.id,'Zone':r.zone,'Brand':r.brand||'','FSN Class':r.fsn,'Capacity':r.cap,'Status':r.status,'SKU in Bin':r.sku}));
   if(!rows.length){toast('No bins to export','warn');return;}
   const ws=XLSX.utils.json_to_sheet(rows);
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Bin Master');XLSX.writeFile(wb,'Bin_Master.xlsx');
@@ -1630,13 +1891,16 @@ function exportBinXLSX(){
    WMS MODULE — SKU MASTER
 ═══════════════════════════════════════════════════════ */
 const SKU_COLS={
-  code:  ['sku code','sku_code','material code','sku','item code'],
-  name:  ['sku name','sku_name','material name','name','description'],
-  case:  ['case pack (units/box)','case pack','casePack','units/box'],
-  box:   ['box/pallet (boxes/shelf)','box/pallet','boxPallet','boxes/shelf'],
-  cls:   ['classification (a/b/c)','classification','class','fsn class'],
-  mrp:   ['mrp','mrp (rs)','price'],
-  status:['sku status','status'],
+  code:      ['sku code','sku_code','material code','sku','item code'],
+  name:      ['sku name','sku_name','material name','name','description'],
+  brand:     ['brand','brand name','brand code'],
+  category:  ['category','product category','cat'],
+  case:      ['case pack (units/box)','case pack','casePack','units/box'],
+  box:       ['box/pallet (boxes/shelf)','box/pallet','boxPallet','boxes/shelf'],
+  mrp:       ['mrp','mrp (rs)','price'],
+  cls:       ['classification (a/b/c)','classification','class','fsn class'],
+  rackRange: ['rack range','rack-range','rack_range','rack location','rack'],
+  status:    ['sku status','status'],
 };
 let _skuFiltered=[], _skuPage=1;
 const SKU_PAGE=100;
@@ -1650,13 +1914,16 @@ function parseSKUFile(ev){
     const cm={};Object.keys(SKU_COLS).forEach(k=>cm[k]=findCol(heads,SKU_COLS[k]));
     if(!cm.code){toast('SKU Code column required','err');return;}
     skuMaster=rows.map(r=>({
-      code:  str(cm.code  ?r[cm.code]  :''),
-      name:  str(cm.name  ?r[cm.name]  :''),
-      casePack:num(cm.case?r[cm.case]  :0)||null,
-      boxPallet:num(cm.box?r[cm.box]   :0)||null,
-      cls:   str(cm.cls   ?r[cm.cls]   :'B'),
-      mrp:   str(cm.mrp   ?r[cm.mrp]   :''),
-      status:str(cm.status?r[cm.status]:'ACTIVE').toUpperCase(),
+      code:      str(cm.code      ?r[cm.code]      :''),
+      name:      str(cm.name      ?r[cm.name]      :''),
+      brand:     str(cm.brand     ?r[cm.brand]     :''),
+      category:  str(cm.category  ?r[cm.category]  :''),
+      casePack:  num(cm.case      ?r[cm.case]      :0)||null,
+      boxPallet: num(cm.box       ?r[cm.box]       :0)||null,
+      mrp:       str(cm.mrp       ?r[cm.mrp]       :''),
+      cls:       str(cm.cls       ?r[cm.cls]       :'B'),
+      rackRange: str(cm.rackRange ?r[cm.rackRange] :''),
+      status:    str(cm.status    ?r[cm.status]    :'ACTIVE').toUpperCase(),
     })).filter(r=>r.code);
     persistAndMark();renderSKUTable();
     toast(`${skuMaster.length} SKUs loaded`,'ok');
@@ -1675,14 +1942,17 @@ function renderSKUPage(){
   const body=$('sku-body');
   const start=(_skuPage-1)*SKU_PAGE;
   const slice=_skuFiltered.slice(start,start+SKU_PAGE);
-  if(!slice.length){body.innerHTML='<tr class="er"><td colspan="7">No SKUs'+(skuMaster.length?'match filter':'— upload SKU Master')+'</td></tr>';renderSKUPgn();return;}
+  if(!slice.length){body.innerHTML='<tr class="er"><td colspan="10">No SKUs'+(skuMaster.length?'match filter':'— upload SKU Master')+'</td></tr>';renderSKUPgn();return;}
   body.innerHTML=slice.map(r=>`<tr>
     <td><span class="sku-b" title="${esc(r.code)}">${esc(r.code)}</span></td>
-    <td style="font-size:11.5px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.name||'—')}</td>
+    <td style="font-size:11.5px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.name||'—')}</td>
+    <td style="text-align:center;font-size:12px">${esc(r.brand||'—')}</td>
+    <td style="text-align:center;font-size:12px">${esc(r.category||'—')}</td>
     <td style="text-align:center;font-size:12px">${r.casePack||'—'}</td>
     <td style="text-align:center;font-size:12px">${r.boxPallet||'—'}</td>
+    <td style="text-align:center;font-size:12px">${esc(r.mrp||'—')}</td>
     <td><span class="badge b-info" style="font-size:9px">${esc(r.cls||'B')}</span></td>
-    <td style="font-size:12px">${esc(r.mrp||'—')}</td>
+    <td style="text-align:center;font-size:12px">${esc(r.rackRange||'—')}</td>
     <td><span class="badge ${r.status==='ACTIVE'?'b-ok':'b-err'}" style="font-size:9px">${esc(r.status||'ACTIVE')}</span></td>
   </tr>`).join('');
   renderSKUPgn();
@@ -1701,17 +1971,17 @@ function renderSKUPgn(){
 
 function dlSKUTpl(){
   const ws=XLSX.utils.aoa_to_sheet([
-    ['SKU Code','SKU Name','Case Pack (Units/Box)','Box/Pallet (Boxes/Shelf)','Classification (A/B/C)','MRP','SKU Status'],
-    ['MWLJNTP.0003.B0_N','LJ NutriMix 2+ 350gm Chocolate Jar',32,6,'A','399','ACTIVE'],
-    ['MWBWSKP.00648.B0_N','BB 10% Urea Lotion 200ml',40,10,'B','449','ACTIVE'],
+    ['SKU Code','SKU Name','Brand','Category','Case Pack (Units/Box)','Box/Pallet (Boxes/Shelf)','MRP','FSN','Rack Range','SKU Status'],
+    ['MWLJNTP.0003.B0_N','LJ NutriMix 2+ 350gm Chocolate Jar','LITTLEJOYS','Nutrition',32,6,'399','A','R14–R20','ACTIVE'],
+    ['MWBWSKP.00648.B0_N','BB 10% Urea Lotion 200ml','BEBODYWISE','Skincare',40,10,'449','B','R4–R20','ACTIVE'],
   ]);
-  ws['!cols']=[{wch:28},{wch:34},{wch:18},{wch:22},{wch:20},{wch:8},{wch:12}];
+  ws['!cols']=[{wch:28},{wch:34},{wch:16},{wch:16},{wch:18},{wch:22},{wch:8},{wch:10},{wch:12},{wch:12}];
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'SKU Master');XLSX.writeFile(wb,'SKU_Master_Template.xlsx');
 }
 
 function exportSKUXLSX(){
   if(!skuMaster.length){toast('No SKU data','warn');return;}
-  const ws=XLSX.utils.json_to_sheet(skuMaster.map(r=>({'SKU Code':r.code,'SKU Name':r.name,'Case Pack':r.casePack||'','Box/Pallet':r.boxPallet||'','Classification':r.cls,'MRP':r.mrp,'Status':r.status})));
+  const ws=XLSX.utils.json_to_sheet(skuMaster.map(r=>({'SKU Code':r.code,'SKU Name':r.name,'Brand':r.brand||'','Category':r.category||'','Case Pack':r.casePack||'','Box/Pallet':r.boxPallet||'','MRP':r.mrp,'FSN':r.cls,'Rack Range':r.rackRange||'','Status':r.status})));
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'SKU Master');XLSX.writeFile(wb,'SKU_Master.xlsx');
   toast('SKU master exported','ok');
 }
@@ -1733,11 +2003,22 @@ async function loadFromSheet(){
     persistAndMark();rebuildGpIdx();
   }
   if(r.skuMaster&&r.skuMaster.length){
-    skuMaster=r.skuMaster.map(s=>({code:s.code,name:s.name,casePack:s.casePack,boxPallet:s.boxPallet,cls:s.cls,mrp:s.mrp,status:s.skuStatus||'ACTIVE'}));
+    skuMaster=r.skuMaster.map(s=>({
+      code:      s.code,
+      name:      s.name,
+      brand:     s.brand||'',
+      category:  s.category||'',
+      casePack:  s.casePack,
+      boxPallet: s.boxPallet,
+      mrp:       s.mrp,
+      cls:       s.cls,
+      rackRange: s.rackRange||'',
+      status:    s.skuStatus||'ACTIVE'
+    }));
     lss('sku',skuMaster);renderSKUTable();
   }
   if(r.binMaster&&r.binMaster.length){
-    binMaster=r.binMaster.map(b=>({id:b.id,zone:b.zone,fsn:b.fsn,cap:b.capacity,status:b.status,sku:b.skuFromDump||''}));
+    binMaster=r.binMaster.map(b=>({id:b.id,zone:b.zone,fsn:b.fsn,cap:b.capacity,status:b.status,sku:b.skuFromDump||'',brand:b.brand||''}));
     lss('bin',binMaster);renderBinTable();
   }
   if(r.inventory||r.gatepasses) loadDashboard();

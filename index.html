@@ -211,23 +211,43 @@
         <div class="ct"><svg viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/></svg>GRN Lines</div>
         <div class="ca">
           <button class="btn btn-s btn-sm" onclick="addGRNLine()">+ Add Line</button>
+          <button class="btn btn-i btn-sm" onclick="generatePutaway()">📦 Generate Putaway</button>
           <button class="btn btn-d btn-sm" onclick="clearGRNLines()" id="grn-clear-btn" style="display:none">✕ Clear Lines</button>
         </div>
       </div>
       <div class="tw" style="max-height:400px;overflow-y:auto">
         <table>
           <thead><tr>
-            <th>#</th><th>SKU Code</th><th>SKU Name</th><th>Batch No</th>
-            <th>MFG Date</th><th>EXP Date</th>
-            <th style="text-align:right">Qty</th><th>Case Pack</th><th>Class</th><th></th>
+            <th>#</th><th>SKU Code</th><th>SKU Name</th><th>Brand</th><th>Batch No</th>
+            <th>MFG Date</th><th>EXP Date</th><th style="text-align:right">Qty</th><th>Case Pack</th>
+            <th>Box/Pallet</th><th style="text-align:right">Full Boxes</th><th style="text-align:right">Loose</th>
+            <th style="text-align:right">Bins</th><th>Class</th><th>Bin</th><th>Suggested</th><th></th>
           </tr></thead>
-          <tbody id="grn-lines-body"><tr class="er"><td colspan="10">Click "+ Add Line" to begin</td></tr></tbody>
+          <tbody id="grn-lines-body"><tr class="er"><td colspan="17">Click "+ Add Line" to begin</td></tr></tbody>
         </table>
       </div>
       <div style="padding:10px 16px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
         <span style="font-size:12px;color:var(--slate4)" id="grn-line-count">0 lines</span>
         <span style="font-size:13px;font-weight:700;color:var(--teal)">Total: <span id="grn-total-qty" class="mono">0</span> units</span>
       </div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="ch"><div class="ct">Putaway Status</div></div>
+      <div class="cb" style="display:flex;gap:10px;flex-wrap:wrap">
+        <span class="chip chip-warn">Pending: <strong id="grn-putaway-pending">0</strong></span>
+        <span class="chip chip-info">Printed: <strong id="grn-putaway-printed">0</strong></span>
+        <span class="chip chip-ok">Completed: <strong id="grn-putaway-completed">0</strong></span>
+      </div>
+    </div>
+    <div class="card" id="grn-putaway-panel" style="display:none">
+      <div class="ch">
+        <div class="ct"><svg viewBox="0 0 24 24"><path d="M3 6h18v4H3z"/><path d="M4 14h16v6H4z"/></svg>Putaway Plan</div>
+        <div class="ca">
+          <button class="btn btn-g btn-sm" onclick="printPutawayPlan()">🖨 Print Sheet</button>
+          <button class="btn btn-p btn-sm" onclick="markPutawayCompleted()" id="grn-putaway-complete-btn" style="display:none">✔ Mark Complete</button>
+        </div>
+      </div>
+      <div class="cb" id="grn-putaway-content"></div>
     </div>
   </div>
 
@@ -240,7 +260,7 @@
       </div>
       <div class="cb">
         <div class="notice n-info"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Columns: <b>SKU Code, SKU Name, Batch No, MFG Date, EXP Date, Qty, Case Pack (Units/Box), Classification (A/B/C)</b>. GRN No, Date, Supplier, Vehicle filled from header above.
+          Columns: <b>SKU Code, SKU Name, Brand, Batch No, MFG Date, EXP Date, Qty, Case Pack (Units/Box), Box/Pallet (Boxes/Shelf), Classification (A/B/C)</b>. GRN No, Date, Supplier, Vehicle filled from header above.
         </div>
         <div class="fg4" style="margin-bottom:10px">
           <div class="form-group"><label>GRN Number</label><input id="grn-up-no" readonly style="background:var(--bg);font-family:ui-monospace,monospace;font-weight:700"></div>
@@ -257,7 +277,7 @@
         <div id="grn-up-preview" style="display:none">
           <div class="tw" style="max-height:300px;overflow-y:auto">
             <table>
-              <thead><tr><th>#</th><th>SKU Code</th><th>SKU Name</th><th>Batch</th><th>MFG</th><th>EXP</th><th style="text-align:right">Qty</th><th>Case Pack</th><th>Class</th></tr></thead>
+              <thead><tr><th>#</th><th>SKU Code</th><th>SKU Name</th><th>Brand</th><th>Batch</th><th>MFG</th><th>EXP</th><th style="text-align:right">Qty</th><th>Case Pack</th><th>Box/Pallet</th><th>Class</th></tr></thead>
               <tbody id="grn-up-body"></tbody>
             </table>
           </div>
@@ -452,10 +472,10 @@
     <div class="tw" style="max-height:520px;overflow-y:auto">
       <table>
         <thead><tr>
-          <th>Bin ID</th><th>Zone</th><th>FSN Class</th><th>Capacity (Boxes)</th>
+          <th>Bin ID</th><th>Zone</th><th>Brand</th><th>FSN Class</th><th>Capacity (Boxes)</th>
           <th>Status</th><th>SKU in Bin</th>
         </tr></thead>
-        <tbody id="bin-body"><tr class="er"><td colspan="6">Upload Bin Master or load from Sheet to view</td></tr></tbody>
+        <tbody id="bin-body"><tr class="er"><td colspan="7">Upload Bin Master or load from Sheet to view</td></tr></tbody>
       </table>
     </div>
     <div class="pgn" id="bin-pgn"></div>
@@ -481,10 +501,10 @@
     <div class="tw" style="max-height:560px;overflow-y:auto">
       <table>
         <thead><tr>
-          <th>SKU Code</th><th>SKU Name</th><th>Case Pack (Units/Box)</th>
-          <th>Box/Pallet</th><th>Classification</th><th>MRP</th><th>Status</th>
+          <th>SKU Code</th><th>SKU Name</th><th>Brand</th><th>Category</th>
+          <th>Case Pack (Units/Box)</th><th>Box/Pallet</th><th>MRP</th><th>FSN</th><th>Rack Range</th><th>Status</th>
         </tr></thead>
-        <tbody id="sku-body"><tr class="er"><td colspan="7">Upload SKU Master or load from Sheet to view</td></tr></tbody>
+        <tbody id="sku-body"><tr class="er"><td colspan="10">Upload SKU Master or load from Sheet to view</td></tr></tbody>
       </table>
     </div>
     <div class="pgn" id="sku-pgn"></div>
