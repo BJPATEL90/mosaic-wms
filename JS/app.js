@@ -1,14 +1,17 @@
-
 'use strict';
 /* ═══════════════════════════════════════════════
    LAYER 1 — UTILITIES
 ═══════════════════════════════════════════════ */
 
-/* ── localStorage (session cache only) ── */
-const ls  = k => { try{ return JSON.parse(localStorage.getItem('mwcc4_'+k)||'null'); }catch(e){ return null; } };
-const lss = (k,v) => { try{ localStorage.setItem('mwcc4_'+k,JSON.stringify(v)); }catch(e){} };
 
 /* ── Toast ── */
+
+
+/* ── Loader ── */
+
+
+/* ── Inline result notice ── */
+
 
 /* ── Days until expiry (handles dd-Mon-yyyy, dd/mm/yyyy, yyyy-mm-dd) ── */
 function daysToExp(expStr){
@@ -81,19 +84,7 @@ async function syncSheet(action,payload){
 }
 
 /* Manual sync trigger — user can click sync dot to force push */
-async function manualSync(){
-  if(!gasUrl()){toast('Set GAS URL first (⚙ Sheet button)','warn');return;}
-  if(!_dirty){toast('Already in sync — nothing to push','ok',2000);return;}
-  toast('Pushing to Google Sheet…','info',2000);
-  const results=await Promise.all([
-    inventory.length ? syncSheet('uploadInventoryDump',inventory) : Promise.resolve({success:true}),
-    adjLog.length    ? syncSheet('saveAdjustment',adjLog)         : Promise.resolve({success:true}),
-    gatepasses.length? syncSheet('saveGatepasses',gatepasses)     : Promise.resolve({success:true}),
-  ]);
-  const allOk=results.every(r=>r&&r.success);
-  if(allOk){ onSyncSuccess(); toast('✅ All data synced to Google Sheet','ok'); }
-  else { toast('⚠ Some syncs failed — check sheet connection','warn'); }
-}
+
 
 function openGasModal(){
   $('gas-url-input').value=gasUrl()||'';
@@ -145,7 +136,11 @@ function markGasOk(ok){
    LAYER 3 — STATE & INDEX MAPS
 ═══════════════════════════════════════════════ */
 let U={name:'',role:''};
-let inventory  = ls('inv') || [];
+let inventory  = (ls('inv') || []).map(r => ({
+  ...r,
+  stockType: str(r.stockType||'GOOD').toUpperCase(),
+  qty: num(r.qty),
+}));
 let gatepasses = ls('gp')  || [];
 let adjLog     = ls('adj') || [];
 let grnLog     = ls('grn') || [];
@@ -192,7 +187,7 @@ function gpRowsFor(skuCode,bin){
   return rows;
 }
 
-function persist(){ lss('inv',inventory); lss('gp',gatepasses); lss('adj',adjLog); lss('grn',grnLog); lss('sku',skuMaster); lss('bin',binMaster); }
+function persist(){ lss('inv',inventory); lss('gp',gatepasses); lss('adj',adjLog); }
 
 /* ═══════════════════════════════════════════════
    LAYER 4 — AUTH
@@ -234,13 +229,6 @@ function bootUser(name,role){
   if(adjLog.length){ renderAdjLog(); updateAdjStats(); }
   if(gasUrl()) markGasOk(true);
   startAutoSync();
-  // WMS extras
-  initGRNNo();
-  renderSKUTable();
-  renderBinTable();
-  loadDashboard();
-  // load from sheet
-  loadFromSheet();
 }
 function confirmExit(){
   if(confirm('Exit WMS? Unsaved session data may be lost.')) location.reload();
@@ -262,17 +250,32 @@ function toggleSidebar(){ $('sidebar').classList.toggle('open'); }
    LAYER 6 — UPLOAD & PARSING
 ═══════════════════════════════════════════════ */
 
-const GP_COLS={
-  gpNo:   ['gatepass no','gp no','gatepass','gatepass number','gp'],
-  date:   ['date','gp date'],
-  skuCode:['sku code','sku_code','material code','sku'],
-  skuName:['sku name','sku_name','material name','name'],
-  batch:  ['batch','batch no','batch_no','lot'],
-  bin:    ['bin','shelf','bin / shelf','bin no','bin id','location'],
-  qty:    ['qty','quantity','gp qty'],
-  status: ['status','gp status'],
-};
+
 function findCol(heads,als){ return heads.find(h=>als.includes(str(h).toLowerCase()))||null; }
+
+const INV_COLS = {
+  skuCode:  ['sku code','sku_code','material code','sku','item code'],
+  skuName:  ['sku name','sku_name','material name','name','description'],
+  batch:    ['batch','batch no','batch_no','lot'],
+  bin:      ['bin','shelf','bin / shelf','location','bin/shelf'],
+  qty:      ['qty','quantity','units','quantity ordered'],
+  stockType:['stock type','type','classification','class'],
+  ean:      ['ean','barcode','upc'],
+  mfgDate:  ['mfg date','mfg_date','manufacture date','manufactured date'],
+  expDate:  ['exp date','exp_date','expiry date','expiry','exp. date'],
+  mrp:      ['mrp','price','rate'],
+};
+
+const GP_COLS = {
+  gpNo:   ['gatepass no','gp no','gatepass number','gp number','gate pass no'],
+  date:   ['date','gp date','gatepass date'],
+  skuCode:['sku code','sku_code','material code','sku','item code'],
+  skuName:['sku name','sku_name','material name','name','description'],
+  batch:  ['batch','batch no','batch_no','lot'],
+  bin:    ['bin','shelf','bin / shelf','location','bin/shelf'],
+  qty:    ['qty','quantity','units'],
+  status: ['status','gp status','gatepass status'],
+};
 
 function parseExcel(file,cb){
   const r=new FileReader();
@@ -292,9 +295,6 @@ function handleDrop(e,type){
   if(type==='inv') parseInvFile({target:{files:[f]}});
   else if(type==='gp') parseGpFile({target:{files:[f]}});
   else if(type==='iw') parseIwFile({target:{files:[f]}});
-  else if(type==='grn') parseGRNFile({target:{files:[f]}});
-  else if(type==='bin') parseBinFile({target:{files:[f]}});
-  else if(type==='sku') parseSKUFile({target:{files:[f]}});
 }
 
 /* ── Inventory ── */
@@ -1080,9 +1080,6 @@ let _snapTimer  = null;
 let _tickTimer  = null;
 
 /* Called after every persist() — mark as dirty */
-const _origPersist = persist;
-// Override persist to set dirty flag
-const _persistOrig = persist;
 
 function persistAndMark(){
   lss('inv',inventory); lss('gp',gatepasses); lss('adj',adjLog);
@@ -1137,7 +1134,6 @@ async function manualSync(){
   if(inventory.length)  jobs.push(syncSheet('uploadInventoryDump',inventory));
   if(adjLog.length)     jobs.push(syncSheet('saveAdjustment',adjLog));
   if(gatepasses.length) jobs.push(syncSheet('saveGatepasses',gatepasses));
-  if(grnLog.length)     jobs.push(syncSheet('saveGRNToSheet',grnLog[grnLog.length-1]));
   if(!jobs.length){ toast('Nothing to sync','info',2000); return; }
   const results=await Promise.all(jobs);
   const allOk=results.every(r=>r&&r.success);
@@ -1173,25 +1169,22 @@ window.addEventListener('beforeunload',function(e){
   e.preventDefault(); e.returnValue=m; return m;
 });
 
-/* ═══════════════════════════════════════════════
-   INIT
-═══════════════════════════════════════════════ */
-window.onload=function(){
-  rebuildInvIdx();rebuildGpIdx();
-  renderSideStats();renderUploadSummary();updateInvNav();
-  if(adjLog.length){renderAdjLog();updateAdjStats();}
-  if(gasUrl()) markGasOk(true);
-  if(window.innerWidth<=768) $('sb-tog').style.display='block';
-};
 /* ═══════════════════════════════════════════════════════
    WMS MODULE — DASHBOARD
 ═══════════════════════════════════════════════════════ */
 function loadDashboard(){
+  // Normalize any legacy inventory rows
+  inventory = inventory.map(r => ({
+    ...r,
+    stockType: str(r.stockType||'GOOD').toUpperCase(),
+    qty: num(r.qty),
+  }));
+
   // Stats from local state
   const totalQty  = inventory.reduce((s,r)=>s+r.qty,0);
-  const goodQty   = inventory.filter(r=>r.stockType==='GOOD').reduce((s,r)=>s+r.qty,0);
-  const dmgQty    = inventory.filter(r=>r.stockType==='DAMAGE'||r.stockType==='DAMAGED').reduce((s,r)=>s+r.qty,0);
-  const blkQty    = inventory.filter(r=>r.stockType==='BLOCKED').reduce((s,r)=>s+r.qty,0);
+  const goodQty   = inventory.filter(r=>{ const t = str(r.stockType||'GOOD').toUpperCase(); return t==='GOOD'; }).reduce((s,r)=>s+r.qty,0);
+  const dmgQty    = inventory.filter(r=>{ const t = str(r.stockType||'GOOD').toUpperCase(); return t==='DAMAGE' || t==='DAMAGED'; }).reduce((s,r)=>s+r.qty,0);
+  const blkQty    = inventory.filter(r=>{ const t = str(r.stockType||'GOOD').toUpperCase(); return t==='BLOCKED'; }).reduce((s,r)=>s+r.qty,0);
   const gpBlocked = gatepasses.reduce((s,r)=>s+r.qty,0);
   const skus      = new Set(inventory.map(r=>r.skuCode)).size;
   const bins      = new Set(inventory.map(r=>r.bin).filter(Boolean)).size;
@@ -1761,16 +1754,40 @@ async function refreshFromSheet(){
 /* ═══════════════════════════════════════════════════════
    INIT
 ═══════════════════════════════════════════════════════ */
+;
+
+/* ═══════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════ */
 window.onload=function(){
+  /* Wire login buttons */
+  var lgU=$('lgU'), lgP=$('lgP'), lgBtn=$('lgBtn');
+  if(lgU)  lgU.addEventListener('keydown', function(e){ if(e.key==='Enter') doLogin(); });
+  if(lgP)  lgP.addEventListener('keydown', function(e){ if(e.key==='Enter') doLogin(); });
+  if(lgBtn)lgBtn.addEventListener('click',  function()  { doLogin(); });
   rebuildInvIdx();rebuildGpIdx();
   renderSideStats();renderUploadSummary();updateInvNav();
   if(adjLog.length){renderAdjLog();updateAdjStats();}
-  if(grnLog.length){$('nav-grn-ct').innerText=grnLog.length;}
   if(gasUrl()) markGasOk(true);
-  if(window.innerWidth<=900) $('sb-tog').style.display='block';
-  // Restore masters from cache
-  if(skuMaster.length) renderSKUTable();
-  if(binMaster.length) renderBinTable();
-  loadDashboard();
+  if(window.innerWidth<=768) $('sb-tog').style.display='block';
 };
 
+
+/* ── Global window exports (for any remaining inline handlers) ── */
+window.doLogin        = doLogin;
+window.confirmExit    = confirmExit;
+window.navTo          = navTo;
+window.toggleSidebar  = toggleSidebar;
+window.openGasModal   = openGasModal;
+window.saveGAS        = saveGAS;
+window.testGAS        = testGAS;
+window.manualSync     = manualSync;
+window.refreshFromSheet = refreshFromSheet;
+window.closeModal     = closeModal;
+window.initCC         = initCC;
+window.loadDashboard  = loadDashboard;
+window.initGRN        = initGRN;
+window.renderGRNHistory = renderGRNHistory;
+window.renderInventorySection = renderInventorySection;
+window.renderBinTable = renderBinTable;
+window.renderSKUTable = renderSKUTable;

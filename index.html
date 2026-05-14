@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mosaic Wellness WMS</title>
-<link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="CSS/style.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
 </head>
@@ -23,9 +23,9 @@
       <span>Mosaic Wellness WMS</span>
     </div>
     <p>Warehouse Management System</p>
-    <div class="lf"><label>User ID</label><input id="lgU" autocomplete="username" onkeydown="if(event.key==='Enter')doLogin()"></div>
-    <div class="lf"><label>Password</label><input id="lgP" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></div>
-    <button class="btn btn-p btn-full" id="lgBtn" onclick="doLogin()" style="margin-top:4px">Sign In</button>
+    <div class="lf"><label>User ID</label><input id="lgU" autocomplete="username"></div>
+    <div class="lf"><label>Password</label><input id="lgP" type="password" autocomplete="current-password"></div>
+    <button class="btn btn-p btn-full" id="lgBtn" style="margin-top:4px">Sign In</button>
     <div id="lgErr" class="lerr"></div>
   </div>
 </div>
@@ -745,9 +745,10 @@
     </div>
   </div>
 </div>
-<script src="js/utils.js"></script>
-<script src="js/inventory.js"></script>
-<script src="js/app.js"></script>
+<script src="JS/core.js"></script>
+<script src="JS/utils.js"></script>
+<script src="JS/cyclecount.js"></script>
+<script src="JS/inventory.js"></script>
+<script src="JS/app.js"></script>
 </body>
 </html>
-
